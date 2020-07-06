@@ -58,17 +58,16 @@ namespace PluginHost
                     break;
                 }
 
-                var services = Interlocked.CompareExchange(ref HandlerServices, null, null);
-                if (services == null) continue;
-
                 bool commendExecuted = false;
 
-                foreach (var handler in services.GetServices<IConsoleInputHandler>())
+                var services = Interlocked.CompareExchange(ref HandlerServices, null, null);
+                if (services != null)
                 {
-                    if (!input.StartsWith(handler.Prefix, StringComparison.OrdinalIgnoreCase)) continue;
-                    handler.Handle(input);
-
-                    commendExecuted = true;
+                    foreach (var handler in services.GetServices<IConsoleInputHandler>())
+                    {
+                        if (handler.Handle(input))
+                            commendExecuted |= true;
+                    }
                 }
 
                 if (!commendExecuted)
@@ -183,16 +182,7 @@ namespace PluginHost
         }
     }
 
-    static class StringExtensions
-    {
-        public static string CutFilePathBasedAppContext(this string path)
-        {
-            var basePath = AppContext.BaseDirectory;
-            return path.StartsWith(basePath, StringComparison.OrdinalIgnoreCase) ? path.Substring(basePath.Length) : path;
-        }
-    }
-
-    public class CollectibleAssemblyLoadContext : AssemblyLoadContext
+    class CollectibleAssemblyLoadContext : AssemblyLoadContext
     {
         public byte[] CheckSum { get; protected set; }
         public string FilePath { get; protected set; }
@@ -222,6 +212,15 @@ namespace PluginHost
                 throw;
             }
             return context;
+        }
+    }
+
+    static class StringExtensions
+    {
+        public static string CutFilePathBasedAppContext(this string path)
+        {
+            var basePath = AppContext.BaseDirectory;
+            return path.StartsWith(basePath, StringComparison.OrdinalIgnoreCase) ? path.Substring(basePath.Length) : path;
         }
     }
 }
