@@ -21,8 +21,10 @@ namespace PluginHost
         CancellationTokenSource TokenSource;
         IServiceProvider HandlerServices;
 
+        const string LoggerName = nameof(Program);
+
         static void Log(string format, params object[] args)
-            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}] {string.Format(format, args)}");
+            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{LoggerName}] {string.Format(format, args)}");
 
         public async Task StartAsync()
         {
@@ -33,6 +35,8 @@ namespace PluginHost
             var pluginsFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
             if (!Directory.Exists(pluginsFolder))
                 Directory.CreateDirectory(pluginsFolder);
+
+            Log($"Start with plugins folder:\n'{pluginsFolder}'");
 
             HandlePluginsFolderChange(TokenSource.Token);
 
@@ -47,7 +51,7 @@ namespace PluginHost
             while (!tokenSources.IsCancellationRequested)
             {
                 var input = await Task.Run(() => Console.ReadLine());
-                if (input == null) continue;
+                if (string.IsNullOrWhiteSpace(input)) continue;
                 if (StringComparer.OrdinalIgnoreCase.Equals(input, "quit"))
                 {
                     tokenSources.Cancel();

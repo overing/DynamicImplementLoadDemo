@@ -7,12 +7,17 @@ namespace EchoPlugin
     {
         public string Prefix => "echo";
 
+        const string LoggerName = nameof(EchoPlugin);
+
+        static void Log(string format, params object[] args)
+            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{LoggerName}] {string.Format(format, args)}");
+
         public void Handle(string input)
         {
             if (input.Length <= "echo ".Length)
-                Console.WriteLine("echo command argument fault; use like 'echo message'");
+                Log("echo command argument fault; use like 'echo message'");
             else
-                Console.WriteLine(input.Substring("echo ".Length) + " (by echo plugin)");
+                Log(input.Substring("echo ".Length) + " (by echo plugin)");
         }
     }
 }
