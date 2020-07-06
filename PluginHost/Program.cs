@@ -93,18 +93,16 @@ namespace PluginHost
 
         void HandlePluginsFolderChange(CancellationToken token)
         {
-            Log($"Handle plugins folder change ...");
+            Log("Handle plugins folder change ...");
 
             var interfaceType = typeof(IConsoleInputHandler);
-            var pluginTypes = new List<Type>();
+            var pluginImplementTypes = new List<Type>();
             var needRebuildServices = false;
             var loadedAssemblies = new HashSet<string>();
             var existsContexts = AssemblyLoadContext.All.OfType<CollectibleAssemblyLoadContext>().ToArray();
 
-            foreach (var file in FileProvider.GetDirectoryContents("plugins"))
+            foreach (var file in FileProvider.GetDirectoryContents("plugins").Where(f => f.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
             {
-                if (!file.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
-
                 byte[] assemblyData;
                 try
                 {
@@ -117,23 +115,25 @@ namespace PluginHost
                 }
 
                 var checkSum = CollectibleAssemblyLoadContext.CalcCheckSum(assemblyData);
-                var context = existsContexts.FirstOrDefault(c => c.FilePath == file.PhysicalPath);
+                var context = existsContexts.FirstOrDefault(c => StringComparer.OrdinalIgnoreCase.Equals(c.FilePath, file.PhysicalPath));
                 if (context != null)
                 {
                     if (checkSum.SequenceEqual(context.CheckSum))
                     {
                         loadedAssemblies.Add(context.FilePath);
+                        foreach (var type in context.PluginClasses.Where(interfaceType.IsAssignableFrom))
+                            pluginImplementTypes.Add(type);
                         continue;
                     }
 
                     var removedPlugins = context.PluginClasses.Aggregate("Removed plugins:", (str, clz) => str + "\n* " + clz.FullName);
-                    Log($"Unload plugins assembly with update '{context.FilePath.Replace(AppContext.BaseDirectory, "")}', {removedPlugins}");
+                    Log($"Unload plugins assembly with update '{context.FilePath.CutFilePathBasedAppContext()}', {removedPlugins}");
                     context.Unload();
                 }
 
                 try
                 {
-                    context = CollectibleAssemblyLoadContext.LoadFromAssemblyPathAsMemoryStream<IConsoleInputHandler>(file.PhysicalPath, assemblyData, checkSum);
+                    context = CollectibleAssemblyLoadContext.LoadFromAssemblyData(interfaceType, file.PhysicalPath, assemblyData, checkSum);
                 }
                 catch (Exception ex)
                 {
@@ -143,11 +143,9 @@ namespace PluginHost
                 loadedAssemblies.Add(context.FilePath);
 
                 var addPlugins = "Add plugins:";
-                foreach (var type in context.PluginClasses)
+                foreach (var type in context.PluginClasses.Where(interfaceType.IsAssignableFrom))
                 {
-                    if (!interfaceType.IsAssignableFrom(type)) continue;
-
-                    pluginTypes.Add(type);
+                    pluginImplementTypes.Add(type);
                     addPlugins += "\n* " + type.FullName;
 
                     needRebuildServices = true;
@@ -155,10 +153,8 @@ namespace PluginHost
                 Log($"Load plugins assembly from '{file.PhysicalPath.CutFilePathBasedAppContext()}', {addPlugins}");
             }
 
-            foreach (var context in existsContexts)
+            foreach (var context in existsContexts.Where(c => !loadedAssemblies.Contains(c.FilePath)))
             {
-                if (loadedAssemblies.Contains(context.FilePath)) continue;
-
                 var removedPlugins = context.PluginClasses.Aggregate("Removed plugins:", (str, clz) => str + "\n* " + clz.FullName);
                 Log($"Unload plugins assembly with delete '{context.FilePath.CutFilePathBasedAppContext()}', {removedPlugins}");
                 context.Unload();
@@ -170,7 +166,7 @@ namespace PluginHost
             {
                 var collection = new ServiceCollection();
                 collection.AddSingleton(this);
-                pluginTypes.ForEach(type => collection.AddSingleton(interfaceType, type));
+                pluginImplementTypes.ForEach(type => collection.AddSingleton(interfaceType, type));
                 var services = collection.BuildServiceProvider(validateScopes: true);
                 var original = Interlocked.Exchange(ref HandlerServices, services);
                 (original as IDisposable)?.Dispose();
@@ -192,9 +188,8 @@ namespace PluginHost
 
         protected override Assembly Load(AssemblyName assemblyName) => null;
 
-        public static CollectibleAssemblyLoadContext LoadFromAssemblyPathAsMemoryStream<TPlugins>(string path, byte[] data, byte[] checkSum)
+        public static CollectibleAssemblyLoadContext LoadFromAssemblyData(Type pluginType, string path, byte[] data, byte[] checkSum)
         {
-            var pluginType = typeof(TPlugins);
             var filename = Path.GetFileNameWithoutExtension(path);
             var context = new CollectibleAssemblyLoadContext(filename);
             var assembly = context.LoadFromStream(new MemoryStream(data));
