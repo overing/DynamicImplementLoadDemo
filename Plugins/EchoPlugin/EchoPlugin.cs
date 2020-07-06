@@ -5,10 +5,8 @@ namespace EchoPlugin
 {
     public class EchoPlugin : IConsoleInputHandler
     {
-        const string LoggerName = nameof(EchoPlugin);
-
         static void Log(string format, params object[] args)
-            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{LoggerName}] {string.Format(format, args)}");
+            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{nameof(EchoPlugin)}] {string.Format(format, args)}");
 
         public bool Handle(string input)
         {

@@ -21,10 +21,8 @@ namespace PluginHost
         CancellationTokenSource TokenSource;
         IServiceProvider HandlerServices;
 
-        const string LoggerName = nameof(Program);
-
         static void Log(string format, params object[] args)
-            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{LoggerName}] {string.Format(format, args)}");
+            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{nameof(Program)}] {string.Format(format, args)}");
 
         public async Task StartAsync()
         {
