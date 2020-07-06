@@ -21,11 +21,18 @@ namespace PluginHost
         CancellationTokenSource TokenSource;
         IServiceProvider HandlerServices;
 
+        static void Log(string format, params object[] args)
+            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}] {string.Format(format, args)}");
+
         public async Task StartAsync()
         {
             var cts = new CancellationTokenSource();
             if (Interlocked.CompareExchange(ref TokenSource, cts, null) != null)
                 throw new InvalidOperationException("Started");
+
+            var pluginsFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
+            if (!Directory.Exists(pluginsFolder))
+                Directory.CreateDirectory(pluginsFolder);
 
             HandlePluginsFolderChange(TokenSource.Token);
 
@@ -61,7 +68,7 @@ namespace PluginHost
                 }
 
                 if (!commendExecuted)
-                    Console.WriteLine($"Command '{input}' not execute.");
+                    Log($"Unknow command '{input}'.");
             }
         }
 
@@ -85,129 +92,125 @@ namespace PluginHost
 
         void HandlePluginsFolderChange(CancellationToken token)
         {
-            Console.WriteLine($"Handle plugins folder change ...");
+            Log($"Handle plugins folder change ...");
 
             var interfaceType = typeof(IConsoleInputHandler);
-
-            var collection = new ServiceCollection();
-            collection.AddSingleton(this);
-
-            bool needRebuildServices = false;
-
-            var existsContexts = AssemblyLoadContext.All.OfType<CollectibleAssemblyLoadContext<IConsoleInputHandler>>().ToArray();
-
+            var pluginTypes = new List<Type>();
+            var needRebuildServices = false;
             var loadedAssemblies = new HashSet<string>();
+            var existsContexts = AssemblyLoadContext.All.OfType<CollectibleAssemblyLoadContext>().ToArray();
 
             foreach (var file in FileProvider.GetDirectoryContents("plugins"))
             {
                 if (!file.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
 
-                var exists = existsContexts.FirstOrDefault(c => c.FilePath == file.PhysicalPath);
-                if (exists == null)
+                byte[] assemblyData;
+                try
                 {
-                    var data = File.ReadAllBytes(file.PhysicalPath);
-                    var check = CollectibleAssemblyLoadContext<IConsoleInputHandler>.CalcCheckSum(data);
-                    try
-                    {
-                        exists = CollectibleAssemblyLoadContext<IConsoleInputHandler>.LoadFromAssemblyPathAsMemoryStream(file.PhysicalPath, check);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Load plugin assembly fault, will skip it: {ex}");
-                        continue;
-                    }
-                    loadedAssemblies.Add(exists.FilePath);
+                    assemblyData = File.ReadAllBytes(file.PhysicalPath);
                 }
-                else
+                catch (Exception ex)
                 {
-                    var data = File.ReadAllBytes(file.PhysicalPath);
-                    var check = CollectibleAssemblyLoadContext<IConsoleInputHandler>.CalcCheckSum(data);
-                    if (check.SequenceEqual(exists.CheckSum))
-                    {
-                        loadedAssemblies.Add(exists.FilePath);
-                        continue;
-                    }
-
-                    foreach (var type in exists.PluginClasses)
-                        Console.WriteLine($"Remove IConsoleInputandler '{type.FullName}'");
-
-                    Console.WriteLine($"Unload context with update '{exists.FilePath.Replace(AppContext.BaseDirectory, "")}'");
-                    exists.Unload();
-
-                    try
-                    {
-                        exists = CollectibleAssemblyLoadContext<IConsoleInputHandler>.LoadFromAssemblyPathAsMemoryStream(file.PhysicalPath, check);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Load plugin assembly fault, will skip it: {ex}");
-                        continue;
-                    }
-                    loadedAssemblies.Add(exists.FilePath);
+                    Log($"Read plugins data fault, will skip it: {ex.Message ?? ex.ToString()}");
+                    continue;
                 }
 
-                var path = file.PhysicalPath;
-                if (path.StartsWith(AppContext.BaseDirectory, StringComparison.OrdinalIgnoreCase))
-                    path = path.Substring(AppContext.BaseDirectory.Length);
-                Console.WriteLine($"Load plugins assembly from '{path}'");
+                var checkSum = CollectibleAssemblyLoadContext.CalcCheckSum(assemblyData);
+                var context = existsContexts.FirstOrDefault(c => c.FilePath == file.PhysicalPath);
+                if (context != null)
+                {
+                    if (checkSum.SequenceEqual(context.CheckSum))
+                    {
+                        loadedAssemblies.Add(context.FilePath);
+                        continue;
+                    }
 
-                foreach (var type in exists.PluginClasses)
+                    var removedPlugins = context.PluginClasses.Aggregate("Removed plugins:", (str, clz) => str + "\n* " + clz.FullName);
+                    Log($"Unload plugins assembly with update '{context.FilePath.Replace(AppContext.BaseDirectory, "")}', {removedPlugins}");
+                    context.Unload();
+                }
+
+                try
+                {
+                    context = CollectibleAssemblyLoadContext.LoadFromAssemblyPathAsMemoryStream<IConsoleInputHandler>(file.PhysicalPath, assemblyData, checkSum);
+                }
+                catch (Exception ex)
+                {
+                    Log($"Load plugins assembly fault, will skip it: {ex.Message ?? ex.ToString()}");
+                    continue;
+                }
+                loadedAssemblies.Add(context.FilePath);
+
+                var addPlugins = "Add plugins:";
+                foreach (var type in context.PluginClasses)
                 {
                     if (!interfaceType.IsAssignableFrom(type)) continue;
 
-                    collection.AddSingleton(interfaceType, type);
-                    Console.WriteLine($"Add IConsoleInputandler '{type.FullName}'");
+                    pluginTypes.Add(type);
+                    addPlugins += "\n* " + type.FullName;
+
                     needRebuildServices = true;
                 }
+                Log($"Load plugins assembly from '{file.PhysicalPath.CutFilePathBasedAppContext()}', {addPlugins}");
             }
 
             foreach (var context in existsContexts)
             {
                 if (loadedAssemblies.Contains(context.FilePath)) continue;
 
-                var path = context.FilePath;
-                if (path.StartsWith(AppContext.BaseDirectory, StringComparison.OrdinalIgnoreCase))
-                    path = path.Substring(AppContext.BaseDirectory.Length);
-                Console.WriteLine($"Unload context with delete '{path}'");
+                var removedPlugins = context.PluginClasses.Aggregate("Removed plugins:", (str, clz) => str + "\n* " + clz.FullName);
+                Log($"Unload plugins assembly with delete '{context.FilePath.CutFilePathBasedAppContext()}', {removedPlugins}");
                 context.Unload();
+
                 needRebuildServices = true;
             }
 
             if (needRebuildServices)
             {
+                var collection = new ServiceCollection();
+                collection.AddSingleton(this);
+                pluginTypes.ForEach(type => collection.AddSingleton(interfaceType, type));
                 var services = collection.BuildServiceProvider(validateScopes: true);
                 var original = Interlocked.Exchange(ref HandlerServices, services);
                 (original as IDisposable)?.Dispose();
             }
             else
-                Console.WriteLine("Not any plugin change.");
+                Log("Not any plugin change.");
         }
     }
 
-    public class CollectibleAssemblyLoadContext<TPlugins> : AssemblyLoadContext
+    static class StringExtensions
     {
-        public Type PluginType = typeof(TPlugins);
-        public IReadOnlyCollection<Type> PluginClasses { get; private set; }
-        public byte[] CheckSum { get; private set; }
-        public string FilePath { get; private set; }
+        public static string CutFilePathBasedAppContext(this string path)
+        {
+            var basePath = AppContext.BaseDirectory;
+            return path.StartsWith(basePath, StringComparison.OrdinalIgnoreCase) ? path.Substring(basePath.Length) : path;
+        }
+    }
 
-        CollectibleAssemblyLoadContext(string name) : base(name, isCollectible: true) { }
+    public class CollectibleAssemblyLoadContext : AssemblyLoadContext
+    {
+        public byte[] CheckSum { get; protected set; }
+        public string FilePath { get; protected set; }
+        public IReadOnlyCollection<Type> PluginClasses { get; protected set; }
 
-        protected override Assembly Load(AssemblyName assemblyName) => null;
+        protected CollectibleAssemblyLoadContext(string name) : base(name, isCollectible: true) { }
 
         public static byte[] CalcCheckSum(byte[] data) => System.Security.Cryptography.MD5.Create().ComputeHash(data);
 
-        public static CollectibleAssemblyLoadContext<TPlugins> LoadFromAssemblyPathAsMemoryStream(string path, byte[] checkSum)
+        protected override Assembly Load(AssemblyName assemblyName) => null;
+
+        public static CollectibleAssemblyLoadContext LoadFromAssemblyPathAsMemoryStream<TPlugins>(string path, byte[] data, byte[] checkSum)
         {
-            var data = File.ReadAllBytes(path);
+            var pluginType = typeof(TPlugins);
             var filename = Path.GetFileNameWithoutExtension(path);
-            var context = new CollectibleAssemblyLoadContext<TPlugins>(filename);
+            var context = new CollectibleAssemblyLoadContext(filename);
             var assembly = context.LoadFromStream(new MemoryStream(data));
             try
             {
                 context.CheckSum = checkSum;
                 context.FilePath = path;
-                context.PluginClasses = assembly.GetTypes().Where(context.PluginType.IsAssignableFrom).ToArray();
+                context.PluginClasses = assembly.GetTypes().Where(pluginType.IsAssignableFrom).ToArray();
             }
             catch
             {
