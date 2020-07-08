@@ -17,7 +17,6 @@ namespace PluginHost
     {
         static Task Main(string[] args) => new Program().StartAsync();
 
-        PhysicalFileProvider FileProvider = new PhysicalFileProvider(AppContext.BaseDirectory, ExclusionFilters.Sensitive);
         CancellationTokenSource TokenSource;
         IServiceProvider HandlerServices;
 
@@ -28,18 +27,30 @@ namespace PluginHost
         {
             var cts = new CancellationTokenSource();
             if (Interlocked.CompareExchange(ref TokenSource, cts, null) != null)
+            {
+                cts.Dispose();
                 throw new InvalidOperationException("Started");
+            }
+
+            var cp = Console.OutputEncoding;
+            if (cp != System.Text.Encoding.UTF8)
+            {
+                Log("Change output encoding to UTF8");
+                Console.OutputEncoding = System.Text.Encoding.UTF8;
+            }
 
             var pluginsFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
             if (!Directory.Exists(pluginsFolder))
                 Directory.CreateDirectory(pluginsFolder);
 
-            Log($"Start with plugins folder:\n'{pluginsFolder}'");
+            var fileProvider = new PhysicalFileProvider(pluginsFolder, ExclusionFilters.Sensitive);
 
-            HandlePluginsFolderChange(TokenSource.Token);
+            Log($"Start host with plugins folder:\n'{pluginsFolder}'");
 
-            var watchPlugins = WatchPluginsFolderAsync(TokenSource.Token);
-            var handleInput = HandleConsoleInputAsync(TokenSource);
+            HandlePluginsFolderChange(fileProvider, cts.Token);
+
+            var watchPlugins = WatchPluginsFolderAsync(fileProvider, cts.Token);
+            var handleInput = HandleConsoleInputAsync(cts);
             await Task.WhenAny(watchPlugins, handleInput);
         }
 
@@ -73,90 +84,81 @@ namespace PluginHost
             }
         }
 
-        async Task WatchPluginsFolderAsync(CancellationToken token)
+        async Task WatchPluginsFolderAsync(IFileProvider fileProvider, CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
-                var changeToken = FileProvider.Watch("plugins/*.dll");
+                var changeToken = fileProvider.Watch("*.dll");
                 var tcs = new TaskCompletionSource<object>();
                 using (token.Register(() => tcs.TrySetCanceled()))
                 {
                     var register = changeToken.RegisterChangeCallback(OnFileChangeCallback, tcs);
-                    await tcs.Task.ConfigureAwait(false);
+                    if (await tcs.Task.ContinueWith(t => t.IsCanceled).ConfigureAwait(false))
+                        return;
 
-                    await Task.Run(() => HandlePluginsFolderChange(token), token);
+                    await Task.Run(() => HandlePluginsFolderChange(fileProvider, token), token);
                 }
             }
         }
 
         static void OnFileChangeCallback(object state) => ((TaskCompletionSource<object>)state).SetResult(null);
 
-        void HandlePluginsFolderChange(CancellationToken token)
+        void HandlePluginsFolderChange(IFileProvider fileProvider, CancellationToken token)
         {
             Log("Handle plugins folder change ...");
 
             var interfaceType = typeof(IConsoleInputHandler);
-            var pluginImplementTypes = new List<Type>();
             var needRebuildServices = false;
+            var pluginImplementTypes = new List<Type>();
             var loadedAssemblies = new HashSet<string>();
-            var existsContexts = AssemblyLoadContext.All.OfType<CollectibleAssemblyLoadContext>().ToArray();
+            var existsContexts = AssemblyLoadContext.All.OfType<CollectibleAssemblyLoadContext>().ToDictionary(c => c.FilePath);
 
-            foreach (var file in FileProvider.GetDirectoryContents("plugins").Where(f => f.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
+            foreach (var file in fileProvider.GetDirectoryContents(string.Empty).Where(f => f.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
             {
-                byte[] assemblyData;
+                CollectibleAssemblyLoadContext context;
                 try
                 {
-                    assemblyData = File.ReadAllBytes(file.PhysicalPath);
-                }
-                catch (Exception ex)
-                {
-                    Log($"Read plugins data fault, will skip it: {ex.Message ?? ex.ToString()}");
-                    continue;
-                }
-
-                var checkSum = CollectibleAssemblyLoadContext.CalcCheckSum(assemblyData);
-                var context = existsContexts.FirstOrDefault(c => StringComparer.OrdinalIgnoreCase.Equals(c.FilePath, file.PhysicalPath));
-                if (context != null)
-                {
-                    if (checkSum.SequenceEqual(context.CheckSum))
+                    var assemblyData = File.ReadAllBytes(file.PhysicalPath);
+                    var checkSum = CollectibleAssemblyLoadContext.CalcCheckSum(assemblyData);
+                    if (existsContexts.TryGetValue(file.PhysicalPath, out context))
                     {
-                        loadedAssemblies.Add(context.FilePath);
-                        foreach (var type in context.PluginClasses.Where(interfaceType.IsAssignableFrom))
-                            pluginImplementTypes.Add(type);
-                        continue;
+                        if (checkSum.SequenceEqual(context.CheckSum))
+                        {
+                            loadedAssemblies.Add(context.FilePath);
+                            pluginImplementTypes.AddRange(context.PluginClasses);
+                            continue;
+                        }
+
+                        var removedPlugins = context.PluginClasses.Aggregate(", Removed plugins:", (str, type) => str + "\n* " + type.FullName);
+                        Log($"Unload '{context.FilePath.CutFilePathBasedAppContext()}' plugins assembly with update{removedPlugins}");
+                        context.Unload();
                     }
 
-                    var removedPlugins = context.PluginClasses.Aggregate("Removed plugins:", (str, clz) => str + "\n* " + clz.FullName);
-                    Log($"Unload plugins assembly with update '{context.FilePath.CutFilePathBasedAppContext()}', {removedPlugins}");
-                    context.Unload();
-                }
-
-                try
-                {
                     context = CollectibleAssemblyLoadContext.LoadFromAssemblyData(interfaceType, file.PhysicalPath, assemblyData, checkSum);
                 }
                 catch (Exception ex)
                 {
-                    Log($"Load plugins assembly fault, will skip it: {ex.Message ?? ex.ToString()}");
+                    Log($"Load '{file.PhysicalPath.CutFilePathBasedAppContext()}' plugins assembly faulted, will skip it: {ex.Message ?? ex.ToString()}");
                     continue;
                 }
-                loadedAssemblies.Add(context.FilePath);
 
-                var addPlugins = "Add plugins:";
-                foreach (var type in context.PluginClasses.Where(interfaceType.IsAssignableFrom))
+                loadedAssemblies.Add(context.FilePath);
+                var addPlugins = ", Add plugins:";
+                foreach (var type in context.PluginClasses)
                 {
                     pluginImplementTypes.Add(type);
                     addPlugins += "\n* " + type.FullName;
 
                     needRebuildServices = true;
                 }
-                Log($"Load plugins assembly from '{file.PhysicalPath.CutFilePathBasedAppContext()}', {addPlugins}");
+                Log($"Load '{file.PhysicalPath.CutFilePathBasedAppContext()}' plugins assembly succeed{addPlugins}");
             }
 
-            foreach (var context in existsContexts.Where(c => !loadedAssemblies.Contains(c.FilePath)))
+            foreach (var pair in existsContexts.Where(p => !loadedAssemblies.Contains(p.Key)))
             {
-                var removedPlugins = context.PluginClasses.Aggregate("Removed plugins:", (str, clz) => str + "\n* " + clz.FullName);
-                Log($"Unload plugins assembly with delete '{context.FilePath.CutFilePathBasedAppContext()}', {removedPlugins}");
+                var context = pair.Value;
+                var removedPlugins = context.PluginClasses.Aggregate(", Removed plugins:", (str, type) => str + "\n* " + type.FullName);
+                Log($"Unload '{context.FilePath.CutFilePathBasedAppContext()}' plugins assembly with delete{removedPlugins}");
                 context.Unload();
 
                 needRebuildServices = true;
@@ -182,7 +184,7 @@ namespace PluginHost
         public string FilePath { get; protected set; }
         public IReadOnlyCollection<Type> PluginClasses { get; protected set; }
 
-        protected CollectibleAssemblyLoadContext(string name) : base(name, isCollectible: true) { }
+        CollectibleAssemblyLoadContext(string name) : base(name, isCollectible: true) { }
 
         public static byte[] CalcCheckSum(byte[] data) => System.Security.Cryptography.MD5.Create().ComputeHash(data);
 
@@ -191,17 +193,19 @@ namespace PluginHost
         public static CollectibleAssemblyLoadContext LoadFromAssemblyData(Type pluginType, string path, byte[] data, byte[] checkSum)
         {
             var filename = Path.GetFileNameWithoutExtension(path);
-            var context = new CollectibleAssemblyLoadContext(filename);
-            var assembly = context.LoadFromStream(new MemoryStream(data));
+            var context = new CollectibleAssemblyLoadContext(filename); // will be add to AssemblyLoadContext.All
             try
             {
+                var assembly = context.LoadFromStream(new MemoryStream(data));
                 context.CheckSum = checkSum;
                 context.FilePath = path;
                 context.PluginClasses = assembly.GetTypes().Where(pluginType.IsAssignableFrom).ToArray();
+                if (context.PluginClasses.Count == 0)
+                    throw new TypeLoadException($"Not contains any '{pluginType}' interface implement.");
             }
             catch
             {
-                context.Unload();
+                context.Unload(); // unload for remove out from AssemblyLoadContext.All
                 throw;
             }
             return context;
