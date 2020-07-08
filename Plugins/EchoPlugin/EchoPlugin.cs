@@ -5,16 +5,17 @@ namespace EchoPlugin
 {
     public class EchoPlugin : IConsoleInputHandler
     {
-        static void Log(string format, params object[] args)
-            => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{nameof(EchoPlugin)}] {string.Format(format, args)}");
+        IConsoleLogger Logger;
+
+        public EchoPlugin(IConsoleLogger logger) => Logger = logger;
 
         public bool Handle(string input)
         {
             if (!input.StartsWith("echo", StringComparison.OrdinalIgnoreCase)) return false;
             if (input.Length <= "echo ".Length)
-                Log("echo command argument fault; use like 'echo message'");
+                Logger.Log("echo command argument fault; use like 'echo message'");
             else
-                Log(input.Substring("echo ".Length) + " (by echo plugin)");
+                Logger.Log(input.Substring("echo ".Length) + " (by echo plugin)");
             return true;
         }
     }

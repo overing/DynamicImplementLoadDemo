@@ -13,14 +13,14 @@ using PluginInterface;
 
 namespace PluginHost
 {
-    class Program
+    class Program : IConsoleLogger
     {
         static Task Main(string[] args) => new Program().StartAsync();
 
         CancellationTokenSource TokenSource;
         IServiceProvider HandlerServices;
 
-        static void Log(string format, params object[] args)
+        public void Log(string format, params object[] args)
             => Console.WriteLine($"[{DateTime.Now:HH\\:mm\\:ss.fff}][{nameof(Program)}] {string.Format(format, args)}");
 
         public async Task StartAsync()
@@ -167,7 +167,7 @@ namespace PluginHost
             if (needRebuildServices)
             {
                 var collection = new ServiceCollection();
-                collection.AddSingleton(this);
+                collection.AddSingleton<IConsoleLogger>(this);
                 pluginImplementTypes.ForEach(type => collection.AddSingleton(interfaceType, type));
                 var services = collection.BuildServiceProvider(validateScopes: true);
                 var original = Interlocked.Exchange(ref HandlerServices, services);
