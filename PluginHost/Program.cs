@@ -94,7 +94,10 @@ namespace PluginHost
                 {
                     var register = changeToken.RegisterChangeCallback(OnFileChangeCallback, tcs);
                     if (await tcs.Task.ContinueWith(t => t.IsCanceled).ConfigureAwait(false))
+                    {
+                        register.Dispose();
                         return;
+                    }
 
                     await Task.Run(() => HandlePluginsFolderChange(fileProvider, token), token);
                 }
